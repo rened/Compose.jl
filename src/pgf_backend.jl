@@ -13,8 +13,8 @@ end
 
 type PGF <: Backend
     # Image size in millimeters.
-    width::Float64
-    height::Float64
+    width::AbsoluteLength
+    height::AbsoluteLength
 
     # Output stream.
     out::IO
@@ -22,13 +22,13 @@ type PGF <: Backend
     # Fill properties cannot be "cleanly" applied to
     # multiple form primitives.  It must be applied
     # each time an object is drawn
-    fill::Union(Nothing, ColorValue)
+    fill::Nullable{ColorValue}
     fill_opacity::Float64
 
-    stroke::Union(Nothing, ColorValue)
+    stroke::Nullable{ColorValue}
     stroke_opacity::Float64
 
-    fontfamily::Union(Nothing,String)
+    fontfamily::Nullable{String}
     fontsize::Float64
 
     # Current level of indentation.
@@ -52,11 +52,11 @@ type PGF <: Backend
     # SVG forbids defining the same property twice, so we have to keep track
     # of which vector property of which type is in effect. If two properties of
     # the same type are in effect, the one higher on the stack takes precedence.
-    vector_properties::Dict{Type, Union(Nothing, Property)}
+    vector_properties::Dict{Type, Nullable{Property}}
 
     # Clip-paths that need to be defined at the end of the document.
     # Not quite sure how to deal with clip paths yet
-    clippath::Union(Nothing,ClipPrimitive)
+    clippath::Nullable{ClipPrimitive}
     # clippaths::Dict{ClipPrimitive, String}
 
     # True when finish has been called and no more drawing should occur
@@ -66,7 +66,7 @@ type PGF <: Backend
     ownedfile::Bool
 
     # Filename when ownedfile is true
-    filename::Union(String, Nothing)
+    filename::Nullable{String}
 
     # Emit the graphic on finish when writing to a buffer.
     emit_on_finish::Bool
@@ -75,24 +75,18 @@ type PGF <: Backend
     only_tikz :: Bool
 
     function PGF(out::IO,
-                 width,
-                 height,
+                 width::AbsoluteLength,
+                 height::AbsoluteLength,
                  emit_on_finish::Bool=true,
                  only_tikz = false)
-        width = size_measure(width)
-        height = size_measure(height)
-        if !isabsolute(width) || !isabsolute(height)
-            error("PGF image size must be specified in absolute units.")
-        end
-
         img = new()
         img.buf = IOBuffer()
         img.fill = default_fill_color
         img.stroke = default_stroke_color
         img.fill_opacity = 1.0
         img.stroke_opacity = 1.0
-        img.width  = width.abs
-        img.height = height.abs
+        img.width  = width
+        img.height = height
         img.fontfamily = nothing
         img.clippath = nothing
         img.fontsize = 12.0
@@ -100,7 +94,7 @@ type PGF <: Backend
         img.out = out
         img.color_set = Set{ColorValue}([color("black")])
         img.property_stack = Array(PGFPropertyFrame, 0)
-        img.vector_properties = Dict{Type, Union(Nothing, Property)}()
+        img.vector_properties = Dict{Type, Nullable{Property}}()
         # img.clippaths = Dict{ClipPrimitive, String}()
         img.visible = true
         img.finished = false
@@ -182,7 +176,7 @@ function isfinished(img::PGF)
 end
 
 function root_box(img::PGF)
-    AbsoluteBoundingBox(0.0, 0.0, img.width, img.height)
+    BoundingBox(0mm, 0mm, img.width, img.height)
 end
 
 function writeheader(img::PGF)
@@ -213,11 +207,11 @@ function writecolors(img::PGF)
     end
 end
 
-function print_pgf_path(out::IO, points::Vector{SimplePoint},
+function print_pgf_path(out::IO, points::Vector{AbsoluteVec2},
                         bridge_gaps::Bool=false)
     isfirst = true
     for point in points
-        x, y = point.x.abs, point.y.abs
+        x, y = point[1].value, point[2].value
         if !(isfinite(x) && isfinite(y))
             isfirst = true
             continue
@@ -249,21 +243,19 @@ function get_vector_properties(img::PGF, idx::Int)
         push_property!(props_str, img, property.primitives[idx])
     end
 
-    if img.fill != nothing
-        push!(props_str, string("fill=mycolor",hex(img.fill)))
+    if !isnull(img.fill)
+        push!(props_str, string("fill=mycolor",hex(get(img.fill))))
         if img.fill_opacity < 1.0
             push!(props_str, string("fill opacity=",svg_fmt_float(img.fill_opacity)))
         end
     end
 
-    if img.stroke != nothing
-        push!(props_str, string("draw=mycolor",hex(img.stroke)))
+    if !isnull(img.stroke)
+        push!(props_str, string("draw=mycolor",hex(get(img.stroke))))
         if img.stroke_opacity < 1.0
             push!(props_str, string("draw opacity=",svg_fmt_float(img.stroke_opacity)))
         end
     end
-
-
 
     return modifiers, props_str
 end
@@ -272,7 +264,7 @@ function push_property!(props_str, img::PGF, property::StrokeDashPrimitive)
     if isempty(property.value)
         return
     else
-        push!(props_str, string("dash pattern=", join(map(v -> join(v, " "),zip(cycle(["on", "off"]),map(v -> string(svg_fmt_float(v.abs), "mm"), property.value)))," ")))
+        push!(props_str, string("dash pattern=", join(map(v -> join(v, " "),zip(cycle(["on", "off"]),map(v -> string(svg_fmt_float(v.value), "mm"), property.value)))," ")))
     end
 end
 
@@ -284,7 +276,7 @@ function push_property!(props_str, img::PGF, property::StrokePrimitive)
         img.stroke = property.color
     end
 
-    if img.stroke != nothing
+    if !isnull(img.stroke)
         push!(img.color_set, convert(RGB, property.color))
     end
 end
@@ -297,7 +289,7 @@ function push_property!(props_str, img::PGF, property::FillPrimitive)
         img.fill = property.color
     end
 
-    if img.fill != nothing
+    if !isnull(img.fill)
         push!(img.color_set, convert(RGB, property.color))
     end
 end
@@ -307,7 +299,7 @@ function push_property!(props_str, img::PGF, property::VisiblePrimitive)
 end
 
 function push_property!(props_str, img::PGF, property::LineWidthPrimitive)
-    push!(props_str, string("line width=", svg_fmt_float(property.value.abs), "mm"))
+    push!(props_str, string("line width=", svg_fmt_float(property.value.value), "mm"))
 end
 
 pgf_fmt_linecap(::LineCapButt) = "butt"
@@ -337,8 +329,7 @@ function push_property!(props_str, img::PGF, property::FontPrimitive)
 end
 
 function push_property!(props_str, img::PGF, property::FontSizePrimitive)
-    img.fontsize = property.value.abs
-    # @printf(img.out, " font-size=\"%s\"", svg_fmt_float(property.value.abs))
+    img.fontsize = property.value.value
 end
 
 function push_property!(props_str, img::PGF, property::ClipPrimitive)
@@ -381,18 +372,15 @@ function draw(img::PGF, prim::LinePrimitive, idx::Int)
     modifiers, props = get_vector_properties(img, idx)
     if !img.visible; return; end
 
-    paths = make_paths(prim.points)
-    for path in paths
-        write(img.buf, join(modifiers))
-        @printf(img.buf, "\\path [%s] ", join(props, ","));
-        print_pgf_path(img.buf, path, true)
-        write(img.buf, ";\n")
-    end
+    write(img.buf, join(modifiers))
+    @printf(img.buf, "\\path [%s] ", join(props, ","));
+    print_pgf_path(img.buf, prim.points, true)
+    write(img.buf, ";\n")
 end
 
 function draw(img::PGF, prim::RectanglePrimitive, idx::Int)
-    width = max(prim.width.abs, 0.01)
-    height = max(prim.height.abs, 0.01)
+    width = max(prim.width.value, 0.01)
+    height = max(prim.height.value, 0.01)
 
     modifiers, props = get_vector_properties(img, idx)
     if !img.visible; return; end
@@ -400,8 +388,8 @@ function draw(img::PGF, prim::RectanglePrimitive, idx::Int)
     write(img.buf, join(modifiers))
     @printf(img.buf, "\\path [%s] ", join(props, ","));
     @printf(img.buf, "(%s,%s) rectangle +(%s,%s);\n",
-            svg_fmt_float(prim.corner.x.abs),
-            svg_fmt_float(prim.corner.y.abs),
+            svg_fmt_float(prim.corner[1].value),
+            svg_fmt_float(prim.corner[2].value),
             svg_fmt_float(width),
             svg_fmt_float(height))
 end
@@ -413,13 +401,10 @@ function draw(img::PGF, prim::PolygonPrimitive, idx::Int)
     modifiers, props = get_vector_properties(img, idx)
     if !img.visible; return; end
 
-    paths = make_paths(prim.points)
-    for path in paths
-        write(img.buf, join(modifiers))
-        @printf(img.buf, "\\path [%s] ", join(props, ","))
-        print_pgf_path(img.buf, path, true)
-        write(img.buf, " -- cycle;\n")
-    end
+    write(img.buf, join(modifiers))
+    @printf(img.buf, "\\path [%s] ", join(props, ","))
+    print_pgf_path(img.buf, prim.points, true)
+    write(img.buf, " -- cycle;\n")
 end
 
 function draw(img::PGF, prim::CirclePrimitive, idx::Int)
@@ -428,9 +413,9 @@ function draw(img::PGF, prim::CirclePrimitive, idx::Int)
     write(img.buf, join(modifiers))
     @printf(img.buf, "\\path [%s] ", join(props, ","))
     @printf(img.buf, "(%s,%s) circle [radius=%s];\n",
-        svg_fmt_float(prim.center.x.abs),
-        svg_fmt_float(prim.center.y.abs),
-        svg_fmt_float(prim.radius.abs))
+        svg_fmt_float(prim.center[1].value),
+        svg_fmt_float(prim.center[2].value),
+        svg_fmt_float(prim.radius.value))
 end
 
 function draw(img::PGF, prim::EllipsePrimitive, idx::Int)
@@ -438,14 +423,14 @@ function draw(img::PGF, prim::EllipsePrimitive, idx::Int)
     modifiers, props = get_vector_properties(img, idx)
     if !img.visible; return; end
 
-    cx = prim.center.x.abs
-    cy = prim.center.y.abs
-    rx = sqrt((prim.x_point.x.abs - cx)^2 +
-              (prim.x_point.y.abs - cy)^2)
-    ry = sqrt((prim.y_point.x.abs - cx)^2 +
-              (prim.y_point.y.abs - cy)^2)
-    theta = rad2deg(atan2(prim.x_point.y.abs - cy,
-                          prim.x_point.x.abs - cx))
+    cx = prim.center[1].value
+    cy = prim.center[2].value
+    rx = sqrt((prim.x_point[1].value - cx)^2 +
+              (prim.x_point[2].value - cy)^2)
+    ry = sqrt((prim.y_point[1].value - cx)^2 +
+              (prim.y_point[2].value - cy)^2)
+    theta = rad2deg(atan2(prim.x_point[2].value - cy,
+                          prim.x_point[1].value - cx))
 
 
     if !all(isfinite([cx, cy, rx, ry, theta]))
@@ -472,14 +457,14 @@ function draw(img::PGF, prim::CurvePrimitive, idx::Int)
     write(img.buf, join(modifiers))
     @printf(img.buf, "\\path [%s] ", join(props, ","))
     @printf(img.buf, "(%s,%s) .. controls (%s,%s) and (%s,%s) .. (%s,%s);\n",
-        svg_fmt_float(prim.anchor0.x.abs),
-        svg_fmt_float(prim.anchor0.y.abs),
-        svg_fmt_float(prim.ctrl0.x.abs),
-        svg_fmt_float(prim.ctrl0.y.abs),
-        svg_fmt_float(prim.ctrl1.x.abs),
-        svg_fmt_float(prim.ctrl1.y.abs),
-        svg_fmt_float(prim.anchor1.x.abs),
-        svg_fmt_float(prim.anchor1.y.abs))
+        svg_fmt_float(prim.anchor0[1].value),
+        svg_fmt_float(prim.anchor0[2].value),
+        svg_fmt_float(prim.ctrl0[1].value),
+        svg_fmt_float(prim.ctrl0[2].value),
+        svg_fmt_float(prim.ctrl1[1].value),
+        svg_fmt_float(prim.ctrl1[2].value),
+        svg_fmt_float(prim.anchor1[1].value),
+        svg_fmt_float(prim.anchor1[2].value))
 end
 
 function draw(img::PGF, prim::TextPrimitive, idx::Int)
@@ -491,9 +476,9 @@ function draw(img::PGF, prim::TextPrimitive, idx::Int)
         "rotate around={",
             svg_fmt_float(-rad2deg(prim.rot.theta)),
             ": (",
-            svg_fmt_float(prim.rot.offset.x.abs - prim.position.x.abs),
+            svg_fmt_float(prim.rot.offset[1].value - prim.position[1].value),
             ",",
-            svg_fmt_float(prim.rot.offset.y.abs - prim.position.y.abs),
+            svg_fmt_float(prim.rot.offset[2].value - prim.position[2].value),
             ")}"))
     if is(prim.halign, hcenter)
         push!(props, "inner sep=0.0")
@@ -504,8 +489,8 @@ function draw(img::PGF, prim::TextPrimitive, idx::Int)
     end
     write(img.buf, join(modifiers))
     @printf(img.buf, "\\draw (%s,%s) node [%s]{\\fontsize{%smm}{%smm}\\selectfont \$%s\$};\n",
-        svg_fmt_float(prim.position.x.abs),
-        svg_fmt_float(prim.position.y.abs),
+        svg_fmt_float(prim.position[1].value),
+        svg_fmt_float(prim.position[2].value),
         replace(join(props, ","), "fill", "text"),
         svg_fmt_float(img.fontsize),
         svg_fmt_float(1.2*img.fontsize),
@@ -555,12 +540,12 @@ function push_property_frame(img::PGF, properties::Vector{Property})
     if length(prop_str) > 0
         @printf(img.buf, "[%s]\n", join(prop_str, ","))
     end
-    if img.clippath != nothing
+    if !isnull(img.clippath)
         write(img.buf, "\\clip ")
         print_pgf_path(img.buf, img.clippath.points)
         write(img.buf, ";\n")
     end
-   if img.fontfamily != nothing
+   if !isnull(img.fontfamily)
        @printf(img.buf, "\\fontspec{%s}\n", img.fontfamily)
     end
 end
